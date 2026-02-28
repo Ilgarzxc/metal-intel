@@ -33,8 +33,8 @@ target_metadata = Base.metadata
 def get_url():
     user = os.getenv("DB_USER")
     password = os.getenv("DB_PASS")
-    host = os.getenv("DB_HOST")
-    port = os.getenv("DB_PORT")
+    host = os.getenv("DB_HOST", "localhost")
+    port = os.getenv("DB_PORT", "5432")
     db = os.getenv("DB_NAME")
 
     return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{db}"

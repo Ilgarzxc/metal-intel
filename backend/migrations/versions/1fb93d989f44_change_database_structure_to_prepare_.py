@@ -32,7 +32,7 @@ def upgrade():
     # Create relation table and many-to-many connection
     op.create_table(
         "release_genres",
-        sa.Column("release_id", sa.Integer, sa.ForeignKey("releases.id", ondelete="CASCADE"))
+        sa.Column("release_id", sa.Integer, sa.ForeignKey("releases.id", ondelete="CASCADE")),
         sa.Column("genre_id", sa.Integer, sa.ForeignKey("genres.id", ondelete="CASCADE")),
     )
     # Delete old column: genres

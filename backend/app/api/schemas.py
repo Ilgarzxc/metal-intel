@@ -6,7 +6,7 @@ class ReleaseCreate(BaseModel):
 	artist: str
 	title: str
 	release_date: Optional[date] = None
-	genre: Optional[str] = None
+	genre: Optional[list[str]] = None
 	country: Optional[str] = None
 	label: Optional[str] = None
 
@@ -14,6 +14,6 @@ class ReleaseUpdate(BaseModel):
 	artist: Optional[str] = None
 	title: Optional[str] = None
 	release_date: Optional[date] = None
-	genre: Optional[str] = None
+	genre: Optional[list[str]] = None
 	country: Optional[str] = None
 	label: Optional[str] = None

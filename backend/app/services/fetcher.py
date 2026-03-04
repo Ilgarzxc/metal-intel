@@ -1,3 +1,7 @@
+# Fetcher for resilience and reliable communication with MusicBrainz API.
+# Async requests and predefined delays. Descriptive logging included.
+# Retry mechanisms implemented.
+
 import time
 import httpx
 import logging
@@ -5,11 +9,14 @@ import asyncio
 
 logger = logging.getLogger(__name__)
 
+# Raised when status is 404 (Not Found)
 class NotFoundError(Exception):
 	pass
 
+# Raised after all retries are exhausted
 class ExternalServiceRetryFailedError(Exception):
 	pass
+
 
 async def fetch_with_retry(
 	client: httpx.AsyncClient,
@@ -20,8 +27,9 @@ async def fetch_with_retry(
 	delays: list[int] = [15, 60, 900],
 ):
 	#---Prepare headers---
+	# ??? check if I have to add contact email to user-agent.
 	headers = headers or {}
-	headers.setdefault("User-Agent", "MyService/1.0")
+	headers.setdefault("User-Agent", "Metal_Albums_Fetcher")
 	
 	#---Retry loop---
 	attempt = 0
@@ -75,7 +83,7 @@ async def fetch_with_retry(
 			raise ExternalServiceRetryFailedError(
 				f"Unexpected status {response.status_code} from external service"
 			)
-
+		# Raise in case of network / connectivity issues.
 		except (httpx.ConnectError, httpx.ReadTimeout, httpx.NetworkError) as e:
 			duration_ms = int((time.monotonic() - start_time) * 1000)
 

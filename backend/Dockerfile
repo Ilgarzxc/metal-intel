@@ -9,3 +9,5 @@ COPY backend/app ./app
 COPY backend/models.py .
 
 COPY etl ./etl
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

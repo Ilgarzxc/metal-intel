@@ -1,13 +1,12 @@
 import asyncio
 import logging
-from ..app.services.musicbrainz import search_releases_group
-from ..app.db import get_connection, execute_batch
+from app.services.musicbrainz import search_releases_group
+from app.db import get_connection, execute_batch
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s  - %(levelname)s - %(message)s',
     filename='fetcher.log'
-)
 logger = logging.getLogger(__name__)
 
 # Белый список жанров

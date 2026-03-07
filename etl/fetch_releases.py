@@ -21,7 +21,7 @@ ALLOWED_GENRES = {
     "Metalcore", "Deathcore", "Stoner Metal"
 }
 
-async def fetch_all_metal(batch_size=100):
+async def fetch_all_metal(batch_size=5):
     offset = 0
     all_releases = []
 
@@ -46,7 +46,7 @@ async def fetch_all_metal(batch_size=100):
             all_releases.append(clean)
 
         logger.info(f"Fetched offset {offset} – {len(releases)} items")
-        offset += batch_size
+        # offset += batch_size // commented out to test
 
     return all_releases
 

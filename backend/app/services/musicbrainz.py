@@ -7,11 +7,13 @@ from .fetcher import fetch_with_retry, NotFoundError, ExternalServiceRetryFailed
 logger = logging.getLogger(__name__)
 
 # Compile a request. Define an endpoint, format of data for return and query itself.
-async def search_releases_by_tag(tag: str):
-	url = "https://musicbrainz.org/ws/2/release"
+async def search_releases_group(tag: str, limit: int = 100, offset: int = 0):
+	url = "https://musicbrainz.org/ws/2/release-group"
 	params = {
-		"query": f"tag:{tag}",
-		"fmt": "json"
+		"query": tag,
+		"fmt": "json",
+        "limit": limit,
+        "offset": offset,
 	}
 	# Create a client for request. Async client to avoid pending connection.
 	# + Error handling

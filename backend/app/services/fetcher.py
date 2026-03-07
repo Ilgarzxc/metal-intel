@@ -29,7 +29,7 @@ async def fetch_with_retry(
 	#---Prepare headers---
 	# ??? check if I have to add contact email to user-agent.
 	headers = headers or {}
-	headers.setdefault("User-Agent", "Metal_Albums_Fetcher")
+	headers.setdefault("User-Agent", "Metal_Albums_Fetcher (ilgar.gurbanov.90@gmail.com)")
 	
 	#---Retry loop---
 	attempt = 0

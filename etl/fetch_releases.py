@@ -26,3 +26,34 @@ MVP: MUSICBRAINZ SERVICE STRATEGY & ROADMAP
    - Metadata Enrichment: Potentially fetching labels and countries from 
      linked 'releases' inside the group.
 '''
+
+import httpx
+import asyncio
+
+async def get_musicbrainz_data(url: str):
+    # 'async with' creates a client which will auto-close after execution.
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, headers={"User-Agent": "Metal_Albums_Fetcher (ilgar.gurbanov.90@gmail.com)"})
+
+async def fetch_all_metal():
+    url = "https://musicbrainz.org/ws/2/release-group"
+    limit = 100
+    offset = 0
+    current_resulsts = []
+
+    async with httpx.AsyncClient() as client:
+        while True:
+            # Request with pagination parameters
+            params = {
+                "query": "tag:metal AND primarytype:Album",
+                "limit": limit,
+                "offset": offset,
+                "fmt": "json"
+            }
+
+            print(f"Fetching offset: {offset}...")
+            response = await client.get(url, params=params)
+            data = response.json()
+
+            #
+            

@@ -2,9 +2,11 @@ version: "3.9"
 
 services:
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: metal_backend
-    ports: 
+    ports:
       - "8000:8000"
     environment:
       DB_HOST: ${DB_HOST}
@@ -12,7 +14,7 @@ services:
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
       DB_PASS: ${DB_PASS}
-    restart: unless-stopped 
+    restart: unless-stopped
     depends_on:
       - postgres
 

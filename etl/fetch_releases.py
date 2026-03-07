@@ -1,7 +1,7 @@
 import asyncio
 import logging
-from ..backend.services.musicbrainz import search_releases_group
-from ..backend.db import get_connection, execute_batch
+from app.services.musicbrainz import search_releases_group
+from app.db import get_connection, execute_batch
 
 logging.basicConfig(
     level=logging.INFO,

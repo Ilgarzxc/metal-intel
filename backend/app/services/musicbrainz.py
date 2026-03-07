@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import httpx
 # Import functions from fetcher.py for reuse.
 from .fetcher import fetch_with_retry, NotFoundError, ExternalServiceRetryFailedError
 

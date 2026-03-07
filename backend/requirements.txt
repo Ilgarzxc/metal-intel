@@ -3,3 +3,6 @@ uvicorn[standard]
 psycopg2-binary
 requests
 alembic
+httpx
+asyncio
+asyncpg

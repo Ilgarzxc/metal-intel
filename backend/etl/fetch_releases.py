@@ -4,7 +4,7 @@ from datetime import datetime, date
 
 import httpx
 
-from app.db import init_pool, execute_batch
+from app.db import init_pool, fetch_all, execute
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -13,7 +13,6 @@ API_URL = "https://musicbrainz.org/ws/2/release/"
 
 
 def parse_date(date_str: str | None) -> date | None:
-    """Преобразует строку даты в datetime.date"""
     if not date_str:
         return None
 
@@ -27,7 +26,6 @@ def parse_date(date_str: str | None) -> date | None:
 
 
 async def fetch_releases(genre: str, limit: int = 5):
-    """Загружает релизы по жанру"""
 
     params = {
         "query": f"tag:{genre}",
@@ -35,52 +33,93 @@ async def fetch_releases(genre: str, limit: int = 5):
         "limit": limit,
     }
 
-    async with httpx.AsyncClient(timeout=30, headers={
-        "User-Agent": "metal-intel/0.1 (contact: ilgar.gurbanov.90@gmail.com)"
-    }
+    async with httpx.AsyncClient(
+        timeout=30,
+        headers={
+            "User-Agent": "metal-intel/0.1 (contact: ilgar.gurbanov.90@gmail.com)"
+        }
     ) as client:
+
         r = await client.get(API_URL, params=params)
         r.raise_for_status()
         data = r.json()
 
     releases = data.get("releases", [])
-    logger.info(f"Fetched {len(releases)} releases for genre '{genre}'")
+
+    logger.info(f"Fetched {len(releases)} releases")
 
     clean = []
 
     for r in releases:
-        clean.append(
-            (
-                r.get("id"),
-                r.get("title"),
-                parse_date(r.get("date")),
-                genre,
-            )
-        )
+
+        artist_credit = r.get("artist-credit", [])
+        artist = ""
+
+        if artist_credit:
+            artist = artist_credit[0].get("name")
+
+        clean.append({
+            "mbid": r.get("id"),
+            "artist": artist,
+            "title": r.get("title"),
+            "release_date": parse_date(r.get("date")),
+            "genres": [genre]   # используем жанр запроса
+        })
 
     return clean
 
 
+async def save_release(release):
+
+    # вставляем релиз
+    row = await fetch_all(
+        """
+        INSERT INTO releases (artist, title, release_date, mbid)
+        VALUES ($1,$2,$3,$4)
+        ON CONFLICT (mbid) DO UPDATE
+        SET title = EXCLUDED.title
+        RETURNING id
+        """,
+        release["artist"],
+        release["title"],
+        release["release_date"],
+        release["mbid"],
+    )
+
+    release_id = row[0]["id"]
+
+    # сохраняем жанры
+    for genre in release["genres"]:
+
+        genre_row = await fetch_all(
+            """
+            INSERT INTO genres (name)
+            VALUES ($1)
+            ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+            RETURNING id
+            """,
+            genre
+        )
+
+        genre_id = genre_row[0]["id"]
+
+        await execute(
+            """
+            INSERT INTO release_genres (release_id, genre_id)
+            VALUES ($1,$2)
+            ON CONFLICT DO NOTHING
+            """,
+            release_id,
+            genre_id
+        )
+
+
 async def save_releases(releases):
 
-    if not releases:
-        logger.warning("No releases to save")
-        return
+    for r in releases:
+        await save_release(r)
 
-    query = """
-    INSERT INTO releases (
-        musicbrainz_id,
-        title,
-        release_date,
-        genre
-    )
-    VALUES ($1,$2,$3,$4)
-    ON CONFLICT (musicbrainz_id) DO NOTHING
-    """
-
-    await execute_batch(query, releases)
-
-    logger.info(f"Saved {len(releases)} releases to DB")
+    logger.info(f"Saved {len(releases)} releases")
 
 
 async def fetch_and_store(genre: str, limit: int = 5):
@@ -96,12 +135,11 @@ async def main():
 
     logger.info(f"Starting fetch for genre: {genre}")
 
-    # Инициализация пула соединений
     await init_pool()
 
     await fetch_and_store(
         genre=genre,
-        limit=5,
+        limit=5
     )
 
     logger.info("Finished")

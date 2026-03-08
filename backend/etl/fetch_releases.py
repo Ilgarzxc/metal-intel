@@ -1,197 +1,28 @@
 import asyncio
 import logging
-from datetime import datetime, date
-
-import httpx
-
-from app.db import init_pool, fetch_all, execute
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-API_URL = "https://musicbrainz.org/ws/2/release/"
-
-
-def parse_date(date_str: str | None) -> date | None:
-    if not date_str:
-        return None
-
-    for fmt in ("%Y-%m-%d", "%Y-%m", "%Y"):
-        try:
-            return datetime.strptime(date_str, fmt).date()
-        except ValueError:
-            continue
-
-    return None
-
-
-async def fetch_releases(genre: str, limit: int = 5):
-
-    params = {
-        "query": f"tag:{genre}",
-        "fmt": "json",
-        "limit": limit,
-    }
-
-    async with httpx.AsyncClient(
-        timeout=30,
-        headers={
-            "User-Agent": "metal-intel/0.1 (contact: ilgar.gurbanov.90@gmail.com)"
-        }
-    ) as client:
-
-        r = await client.get(API_URL, params=params)
-        r.raise_for_status()
-        data = r.json()
-
-    releases = data.get("releases", [])
-
-    logger.info(f"Fetched {len(releases)} releases")
-
-    clean = []
-
-    for r in releases:
-
-        artist_credit = r.get("artist-credit", [])
-        artist = ""
-
-        if artist_credit:
-            artist = artist_credit[0].get("name")
-
-        clean.append({
-            "mbid": r.get("id"),
-            "artist": artist,
-            "title": r.get("title"),
-            "release_date": parse_date(r.get("date")),
-            "genres": [genre]   # используем жанр запроса
-        })
-
-    return clean
-
-
-async def save_release(release):
-
-    # вставляем релиз
-    row = await fetch_all(
-        """
-        INSERT INTO releases (artist, title, release_date, mbid)
-        VALUES ($1,$2,$3,$4)
-        ON CONFLICT (mbid) DO UPDATE
-        SET title = EXCLUDED.title
-        RETURNING id
-        """,
-        release["artist"],
-        release["title"],
-        release["release_date"],
-        release["mbid"],
-    )
-
-    release_id = row[0]["id"]
-
-    # сохраняем жанры
-    for genre in release["genres"]:
-
-        genre_row = await fetch_all(
-            """
-            INSERT INTO genres (name)
-            VALUES ($1)
-            ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
-            RETURNING id
-            """,
-            genre
-        )
-
-        genre_id = genre_row[0]["id"]
-
-        await execute(
-            """
-            INSERT INTO release_genres (release_id, genre_id)
-            VALUES ($1,$2)
-            ON CONFLICT DO NOTHING
-            """,
-            release_id,
-            genre_id
-        )
-
-
-async def save_releases(releases):
-
-    for r in releases:
-        await save_release(r)
-
-    logger.info(f"Saved {len(releases)} releases")
-
-
-async def fetch_and_store(genre: str, limit: int = 5):
-
-    releases = await fetch_releases(genre, limit)
-
-    await save_releases(releases)
-
-
-async def main():
-
-    genre = "metal"
-
-    logger.info(f"Starting fetch for genre: {genre}")
-
-    await init_pool()
-
-    await fetch_and_store(
-        genre=genre,
-        limit=5
-    )
-
-    logger.info("Finished")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-
-'''import asyncio
-import logging
-
+from datetime import datetime
+from app.db import init_pool, get_connection, execute_batch, execute
 from app.services.musicbrainz import search_releases_group
-from app.db import get_connection, execute_batch
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    filename="fetcher.log",
 )
-
 logger = logging.getLogger(__name__)
 
 
-ALLOWED_GENRES = {
-    "Black Metal", "Death Metal", "Doom Metal",
-    "Heavy Metal", "Thrash Metal", "Power Metal",
-    "Folk Metal", "Progressive Metal", "Symphonic Metal",
-    "Alternative Metal", "Avant-garde Metal",
-    "Blackened Death Metal", "Drone Metal",
-    "Gothic Metal", "Grunge", "Industrial Metal",
-    "Post-metal", "Mathcore", "Metalcore",
-    "Deathcore", "Stoner Metal"
-}
-
-
-# -----------------------------
-# Transform API data
-# -----------------------------
 def transform_release(item):
-
+    """Преобразует релиз из API в формат для базы"""
     mbid = item.get("id")
     title = item.get("title")
-
-    artists_credits = item.get("artist-credit", [])
-    artist_name = "".join(a.get("name", "") for a in artists_credits)
+    artist_credit = item.get("artist-credit", [])
+    artist = "".join(a.get("name", "") for a in artist_credit)
 
     raw_date = item.get("first-release-date", "")
     parts = raw_date.split("-") if raw_date else []
-
+    # Приведение даты к формату YYYY-MM-DD
     while 0 < len(parts) < 3:
         parts.append("01")
-
     clean_date = "-".join(parts) if parts else None
 
     tags = item.get("tags", [])
@@ -200,133 +31,116 @@ def transform_release(item):
     return {
         "mbid": mbid,
         "title": title,
-        "artist": artist_name,
+        "artist": artist,
         "release_date": clean_date,
         "genres": genres
     }
 
 
-# -----------------------------
-# Save releases
-# -----------------------------
 async def save_releases(conn, releases):
-
+    """Сохраняет релизы в БД с проверкой на уникальность mbid"""
     if not releases:
         return
 
     query = """
     INSERT INTO releases (artist, title, release_date, mbid)
-    VALUES ($1,$2,$3,$4)
+    VALUES ($1, $2, $3, $4)
     ON CONFLICT (mbid) DO NOTHING
     """
 
-    params = [
-        (
-            r["artist"],
-            r["title"],
-            r["release_date"],
-            r["mbid"]
-        )
-        for r in releases
-    ]
-
+    params = [(r["artist"], r["title"], r["release_date"], r["mbid"]) for r in releases]
     await execute_batch(query, params)
 
 
-# -----------------------------
-# Save genres
-# -----------------------------
 async def save_genres(conn, releases):
+    """Сохраняет все жанры и связывает с релизами"""
+    if not releases:
+        return
 
+    # Собираем все уникальные жанры из батча
     genre_set = set()
-
     for r in releases:
         for g in r["genres"]:
-            if g in ALLOWED_GENRES:
-                genre_set.add(g)
+            genre_set.add(g)
 
     if not genre_set:
         return
 
-    query = """
-    INSERT INTO genres (name)
-    VALUES ($1)
-    ON CONFLICT (name) DO NOTHING
-    """
+    # Вставка новых жанров
+    genre_params = [(g,) for g in genre_set]
+    await execute_batch("INSERT INTO genres (name) VALUES ($1) ON CONFLICT (name) DO NOTHING", genre_params)
 
-    params = [(g,) for g in genre_set]
+    # Связывание релизов с жанрами
+    for r in releases:
+        for g in r["genres"]:
+            # Получаем id жанра
+            genre_row = await conn.fetchrow("SELECT id FROM genres WHERE name = $1", g)
+            if not genre_row:
+                continue
+            genre_id = genre_row["id"]
 
-    await execute_batch(query, params)
+            # Получаем id релиза
+            release_row = await conn.fetchrow("SELECT id FROM releases WHERE mbid = $1", r["mbid"])
+            if not release_row:
+                continue
+            release_id = release_row["id"]
+
+            await execute(
+                "INSERT INTO release_genres (release_id, genre_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                release_id, genre_id
+            )
 
 
-# -----------------------------
-# Main fetch loop
-# -----------------------------
 async def fetch_all_metal(batch_size=100, max_pages=None):
-
+    """Постраничная загрузка релизов с MusicBrainz"""
     offset = 0
     page = 0
-
     conn = await get_connection()
 
     try:
-
         while True:
-
-            await asyncio.sleep(1)  # MusicBrainz rate limit
+            await asyncio.sleep(1)  # Соблюдение Rate Limit MusicBrainz
 
             data = await search_releases_group("metal", batch_size, offset)
             releases = data.get("release-groups")
-
+            
             if not releases:
                 logger.info("No more releases found")
                 break
 
             clean_releases = []
-
             for item in releases:
-
+                # Оставляем только полноформатные альбомы
                 if item.get("primary-type") != "Album":
                     continue
-
+                
                 clean = transform_release(item)
+                
+                # Сохраняем альбом, если у него есть хотя бы один любой жанр/тег
+                if clean["genres"]:
+                    clean_releases.append(clean)
 
-                genres = [g for g in clean["genres"] if g in ALLOWED_GENRES]
-
-                if not genres:
-                    continue
-
-                clean["genres"] = genres
-
-                clean_releases.append(clean)
-
-            await save_releases(conn, clean_releases)
-            await save_genres(conn, clean_releases)
-
-            logger.info(f"Fetched offset {offset} – {len(clean_releases)} albums saved")
+            if clean_releases:
+                await save_releases(conn, clean_releases)
+                await save_genres(conn, clean_releases)
+                logger.info(f"Fetched offset {offset} – {len(clean_releases)} albums saved")
+            else:
+                logger.info(f"Fetched offset {offset} – No albums with tags found in this batch")
 
             offset += batch_size
             page += 1
 
             if max_pages and page >= max_pages:
-                logger.info("Reached test page limit")
+                logger.info("Reached max pages limit")
                 break
-
     finally:
         await conn.close()
 
 
-# -----------------------------
-# Entry point
-# -----------------------------
 async def main():
-
-    # для теста можно ограничить
-    await fetch_all_metal(
-        batch_size=100,
-        max_pages=1
-    )
+    await init_pool()
+    await fetch_all_metal(batch_size=100, max_pages=None)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())'''
+    asyncio.run(main())

@@ -1,31 +1,19 @@
 import asyncio
 import logging
-
 from app.services.musicbrainz import search_releases_group
-from app.db import get_connection, execute_batch, init_pool
+from app.db import get_connection, execute_batch
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     filename="fetcher.log",
 )
-logger = logging.getLogger(__name__)
 
-# Разрешённые жанры
-ALLOWED_GENRES = {
-    "Black Metal", "Death Metal", "Doom Metal",
-    "Heavy Metal", "Thrash Metal", "Power Metal",
-    "Folk Metal", "Progressive Metal", "Symphonic Metal",
-    "Alternative Metal", "Avant-garde Metal",
-    "Blackened Death Metal", "Drone Metal", "Gothic Metal", "Grunge",
-    "Industrial Metal", "Post-metal", "Mathcore",
-    "Metalcore", "Deathcore", "Stoner Metal"
-}
+logger = logging.getLogger(__name__)
 
 
 # -----------------------------
-# Преобразование данных MusicBrainz
+# Transform API data
 # -----------------------------
 def transform_release(item):
     mbid = item.get("id")
@@ -52,31 +40,34 @@ def transform_release(item):
 
 
 # -----------------------------
-# Сохранение релизов
+# Save releases
 # -----------------------------
 async def save_releases(conn, releases):
     if not releases:
+        logger.info("No releases to save")
         return
 
     query = """
     INSERT INTO releases (artist, title, release_date, mbid)
-    VALUES ($1, $2, $3, $4)
+    VALUES ($1,$2,$3,$4)
     ON CONFLICT (mbid) DO NOTHING
     """
     params = [(r["artist"], r["title"], r["release_date"], r["mbid"]) for r in releases]
+    logger.info(f"Inserting {len(params)} releases into DB: {params}")
     await execute_batch(query, params)
 
 
 # -----------------------------
-# Сохранение жанров
+# Save genres
 # -----------------------------
 async def save_genres(conn, releases):
     genre_set = set()
     for r in releases:
         for g in r["genres"]:
-            if g in ALLOWED_GENRES:
-                genre_set.add(g)
+            genre_set.add(g)
+
     if not genre_set:
+        logger.info("No genres to save")
         return
 
     query = """
@@ -85,11 +76,12 @@ async def save_genres(conn, releases):
     ON CONFLICT (name) DO NOTHING
     """
     params = [(g,) for g in genre_set]
+    logger.info(f"Inserting {len(params)} genres into DB: {params}")
     await execute_batch(query, params)
 
 
 # -----------------------------
-# Основной цикл получения релизов
+# Main fetch loop
 # -----------------------------
 async def fetch_all_metal(batch_size=5, max_pages=1):
     offset = 0
@@ -98,10 +90,12 @@ async def fetch_all_metal(batch_size=5, max_pages=1):
     conn = await get_connection()
     try:
         while True:
-            await asyncio.sleep(1)  # ограничение по rate-limit MusicBrainz
+            await asyncio.sleep(1)  # MusicBrainz rate limit
 
             data = await search_releases_group("metal", batch_size, offset)
             releases = data.get("release-groups")
+            logger.info(f"Fetched raw data from MusicBrainz (offset {offset}): {releases}")
+
             if not releases:
                 logger.info("No more releases found")
                 break
@@ -109,37 +103,30 @@ async def fetch_all_metal(batch_size=5, max_pages=1):
             clean_releases = []
             for item in releases:
                 if item.get("primary-type") != "Album":
+                    logger.info(f"Skipping non-album release: {item.get('title')}")
                     continue
 
                 clean = transform_release(item)
-                genres = [g for g in clean["genres"] if g in ALLOWED_GENRES]
-                if not genres:
-                    continue
-                clean["genres"] = genres
+                logger.info(f"Transformed release: {clean}")
                 clean_releases.append(clean)
 
             await save_releases(conn, clean_releases)
             await save_genres(conn, clean_releases)
 
-            logger.info(f"Fetched offset {offset} – {len(clean_releases)} albums saved")
-
             offset += batch_size
             page += 1
+
             if max_pages and page >= max_pages:
-                logger.info("Reached test limit of 5 releases")
+                logger.info("Reached test limit")
                 break
     finally:
         await conn.close()
 
 
 # -----------------------------
-# Точка входа
+# Entry point
 # -----------------------------
 async def main():
-    # Инициализируем пул соединений
-    await init_pool()
-
-    # Загружаем тестовую партию релизов
     await fetch_all_metal(batch_size=5, max_pages=1)
 
 

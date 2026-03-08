@@ -4,48 +4,43 @@ from datetime import datetime, date
 
 import httpx
 
-from app.db import get_connection, execute_batch
+from app.db import init_pool, execute_batch
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 
 API_URL = "https://musicbrainz.org/ws/2/release/"
 
 
 def parse_date(date_str: str | None) -> date | None:
-    """
-    Преобразует строку даты в datetime.date
-    """
+    """Преобразует строку даты в datetime.date"""
     if not date_str:
         return None
 
-    try:
-        return datetime.strptime(date_str, "%Y-%m-%d").date()
-    except Exception:
+    for fmt in ("%Y-%m-%d", "%Y-%m", "%Y"):
         try:
-            return datetime.strptime(date_str, "%Y-%m").date()
-        except Exception:
-            try:
-                return datetime.strptime(date_str, "%Y").date()
-            except Exception:
-                return None
+            return datetime.strptime(date_str, fmt).date()
+        except ValueError:
+            continue
+
+    return None
 
 
 async def fetch_releases(genre: str, limit: int = 5):
-    """
-    Загружает релизы по жанру
-    """
+    """Загружает релизы по жанру"""
+
     params = {
         "query": f"tag:{genre}",
         "fmt": "json",
         "limit": limit,
     }
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, headers={
+        "User-Agent": "metal-intel/0.1 (contact: ilgar.gurbanov.90@gmail.com)"
+    }
+    ) as client:
         r = await client.get(API_URL, params=params)
         r.raise_for_status()
-
         data = r.json()
 
     releases = data.get("releases", [])
@@ -54,15 +49,11 @@ async def fetch_releases(genre: str, limit: int = 5):
     clean = []
 
     for r in releases:
-        release_id = r.get("id")
-        title = r.get("title")
-        date_str = r.get("date")
-
         clean.append(
             (
-                release_id,
-                title,
-                parse_date(date_str),
+                r.get("id"),
+                r.get("title"),
+                parse_date(r.get("date")),
                 genre,
             )
         )
@@ -70,7 +61,7 @@ async def fetch_releases(genre: str, limit: int = 5):
     return clean
 
 
-async def save_releases(conn, releases):
+async def save_releases(releases):
 
     if not releases:
         logger.warning("No releases to save")
@@ -96,12 +87,7 @@ async def fetch_and_store(genre: str, limit: int = 5):
 
     releases = await fetch_releases(genre, limit)
 
-    conn = await get_connection()
-
-    try:
-        await save_releases(conn, releases)
-    finally:
-        await conn.close()
+    await save_releases(releases)
 
 
 async def main():
@@ -109,6 +95,9 @@ async def main():
     genre = "metal"
 
     logger.info(f"Starting fetch for genre: {genre}")
+
+    # Инициализация пула соединений
+    await init_pool()
 
     await fetch_and_store(
         genre=genre,

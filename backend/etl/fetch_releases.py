@@ -96,8 +96,12 @@ async def fetch_and_store(genre: str, limit: int = 5):
 
     releases = await fetch_releases(genre, limit)
 
-    async with get_connection() as conn:
+    conn = await get_connection()
+
+    try:
         await save_releases(conn, releases)
+    finally:
+        await conn.close()
 
 
 async def main():

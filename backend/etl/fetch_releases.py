@@ -20,10 +20,21 @@ def transform_release(item):
 
     raw_date = item.get("first-release-date", "")
     parts = raw_date.split("-") if raw_date else []
-    # Приведение даты к формату YYYY-MM-DD
+    
+    # Дополняем до полной даты YYYY-MM-DD
     while 0 < len(parts) < 3:
         parts.append("01")
-    clean_date = "-".join(parts) if parts else None
+    
+    clean_date_str = "-".join(parts) if parts else None
+    
+    # ПРЕОБРАЗОВАНИЕ В ОБЪЕКТ DATE
+    final_date = None
+    if clean_date_str:
+        try:
+            # Превращаем строку "YYYY-MM-DD" в объект date
+            final_date = datetime.strptime(clean_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            final_date = None
 
     tags = item.get("tags", [])
     genres = [t.get("name") for t in tags] if tags else []
@@ -32,7 +43,7 @@ def transform_release(item):
         "mbid": mbid,
         "title": title,
         "artist": artist,
-        "release_date": clean_date,
+        "release_date": final_date,  # Теперь здесь объект date, а не str
         "genres": genres
     }
 

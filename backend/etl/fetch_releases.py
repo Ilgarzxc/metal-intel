@@ -1,124 +1,117 @@
 import asyncio
 import logging
+from datetime import datetime, date
 
-from app.services.musicbrainz import search_releases_group
-from app.db import get_connection, execute_batch, init_pool
+import httpx
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    filename="fetcher.log",
-)
+from app.db import get_connection, execute_batch
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def transform_release(item):
-    mbid = item.get("id")
-    title = item.get("title")
+API_URL = "https://musicbrainz.org/ws/2/release/"
 
-    artists_credits = item.get("artist-credit", [])
-    artist_name = "".join(a.get("name", "") for a in artists_credits)
 
-    raw_date = item.get("first-release-date", "")
-    parts = raw_date.split("-") if raw_date else []
+def parse_date(date_str: str | None) -> date | None:
+    """
+    Преобразует строку даты в datetime.date
+    """
+    if not date_str:
+        return None
 
-    while 0 < len(parts) < 3:
-        parts.append("01")
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except Exception:
+        try:
+            return datetime.strptime(date_str, "%Y-%m").date()
+        except Exception:
+            try:
+                return datetime.strptime(date_str, "%Y").date()
+            except Exception:
+                return None
 
-    clean_date = "-".join(parts) if parts else None
 
-    tags = item.get("tags", [])
-    genres = [t.get("name") for t in tags] if tags else []
-
-    return {
-        "mbid": mbid,
-        "title": title,
-        "artist": artist_name,
-        "release_date": clean_date,
-        "genres": genres
+async def fetch_releases(genre: str, limit: int = 5):
+    """
+    Загружает релизы по жанру
+    """
+    params = {
+        "query": f"tag:{genre}",
+        "fmt": "json",
+        "limit": limit,
     }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(API_URL, params=params)
+        r.raise_for_status()
+
+        data = r.json()
+
+    releases = data.get("releases", [])
+    logger.info(f"Fetched {len(releases)} releases for genre '{genre}'")
+
+    clean = []
+
+    for r in releases:
+        release_id = r.get("id")
+        title = r.get("title")
+        date_str = r.get("date")
+
+        clean.append(
+            (
+                release_id,
+                title,
+                parse_date(date_str),
+                genre,
+            )
+        )
+
+    return clean
 
 
 async def save_releases(conn, releases):
 
     if not releases:
-        logger.info("No releases to save")
+        logger.warning("No releases to save")
         return
 
     query = """
-    INSERT INTO releases (artist, title, release_date, mbid)
+    INSERT INTO releases (
+        musicbrainz_id,
+        title,
+        release_date,
+        genre
+    )
     VALUES ($1,$2,$3,$4)
-    ON CONFLICT (mbid) DO NOTHING
+    ON CONFLICT (musicbrainz_id) DO NOTHING
     """
 
-    params = [
-        (r["artist"], r["title"], r["release_date"], r["mbid"])
-        for r in releases
-    ]
+    await execute_batch(query, releases)
 
-    logger.info(f"Inserting {len(params)} releases")
-
-    await execute_batch(query, params)
+    logger.info(f"Saved {len(releases)} releases to DB")
 
 
-async def fetch_all_metal(batch_size=5, max_pages=1):
+async def fetch_and_store(genre: str, limit: int = 5):
 
-    offset = 0
-    page = 0
+    releases = await fetch_releases(genre, limit)
 
-    conn = await get_connection()
-
-    try:
-
-        while True:
-
-            await asyncio.sleep(1)
-
-            data = await search_releases_group("metal", batch_size, offset)
-
-            releases = data.get("release-groups")
-
-            logger.info(f"MusicBrainz returned {len(releases)} items")
-
-            if not releases:
-                break
-
-            clean_releases = []
-
-            for item in releases:
-
-                if item.get("primary-type") != "Album":
-                    continue
-
-                clean = transform_release(item)
-
-                logger.info(f"Parsed release: {clean}")
-
-                clean_releases.append(clean)
-
-            await save_releases(conn, clean_releases)
-
-            offset += batch_size
-            page += 1
-
-            if max_pages and page >= max_pages:
-                logger.info("Reached test limit")
-                break
-
-    finally:
-        await conn.close()
+    async with get_connection() as conn:
+        await save_releases(conn, releases)
 
 
 async def main():
 
-    # 🔴 critical line
-    await init_pool()
+    genre = "metal"
 
-    await fetch_all_metal(
-        batch_size=5,
-        max_pages=1
+    logger.info(f"Starting fetch for genre: {genre}")
+
+    await fetch_and_store(
+        genre=genre,
+        limit=5,
     )
+
+    logger.info("Finished")
 
 
 if __name__ == "__main__":

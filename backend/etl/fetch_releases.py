@@ -2,28 +2,31 @@ import asyncio
 import logging
 
 from app.services.musicbrainz import search_releases_group
-from app.db import get_connection, execute_batch
+from app.db import get_connection, execute_batch, init_pool
 
+# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     filename="fetcher.log",
 )
-
 logger = logging.getLogger(__name__)
 
+# Разрешённые жанры
 ALLOWED_GENRES = {
     "Black Metal", "Death Metal", "Doom Metal",
     "Heavy Metal", "Thrash Metal", "Power Metal",
     "Folk Metal", "Progressive Metal", "Symphonic Metal",
     "Alternative Metal", "Avant-garde Metal",
-    "Blackened Death Metal", "Drone Metal",
-    "Gothic Metal", "Grunge", "Industrial Metal",
-    "Post-metal", "Mathcore", "Metalcore",
-    "Deathcore", "Stoner Metal"
+    "Blackened Death Metal", "Drone Metal", "Gothic Metal", "Grunge",
+    "Industrial Metal", "Post-metal", "Mathcore",
+    "Metalcore", "Deathcore", "Stoner Metal"
 }
 
 
+# -----------------------------
+# Преобразование данных MusicBrainz
+# -----------------------------
 def transform_release(item):
     mbid = item.get("id")
     title = item.get("title")
@@ -48,19 +51,25 @@ def transform_release(item):
     }
 
 
+# -----------------------------
+# Сохранение релизов
+# -----------------------------
 async def save_releases(conn, releases):
     if not releases:
         return
 
     query = """
     INSERT INTO releases (artist, title, release_date, mbid)
-    VALUES ($1,$2,$3,$4)
+    VALUES ($1, $2, $3, $4)
     ON CONFLICT (mbid) DO NOTHING
     """
     params = [(r["artist"], r["title"], r["release_date"], r["mbid"]) for r in releases]
     await execute_batch(query, params)
 
 
+# -----------------------------
+# Сохранение жанров
+# -----------------------------
 async def save_genres(conn, releases):
     genre_set = set()
     for r in releases:
@@ -79,14 +88,17 @@ async def save_genres(conn, releases):
     await execute_batch(query, params)
 
 
+# -----------------------------
+# Основной цикл получения релизов
+# -----------------------------
 async def fetch_all_metal(batch_size=5, max_pages=1):
     offset = 0
     page = 0
-    conn = await get_connection()
 
+    conn = await get_connection()
     try:
         while True:
-            await asyncio.sleep(1)  # rate limit
+            await asyncio.sleep(1)  # ограничение по rate-limit MusicBrainz
 
             data = await search_releases_group("metal", batch_size, offset)
             releases = data.get("release-groups")
@@ -98,6 +110,7 @@ async def fetch_all_metal(batch_size=5, max_pages=1):
             for item in releases:
                 if item.get("primary-type") != "Album":
                     continue
+
                 clean = transform_release(item)
                 genres = [g for g in clean["genres"] if g in ALLOWED_GENRES]
                 if not genres:
@@ -112,7 +125,6 @@ async def fetch_all_metal(batch_size=5, max_pages=1):
 
             offset += batch_size
             page += 1
-
             if max_pages and page >= max_pages:
                 logger.info("Reached test limit of 5 releases")
                 break
@@ -120,7 +132,14 @@ async def fetch_all_metal(batch_size=5, max_pages=1):
         await conn.close()
 
 
+# -----------------------------
+# Точка входа
+# -----------------------------
 async def main():
+    # Инициализируем пул соединений
+    await init_pool()
+
+    # Загружаем тестовую партию релизов
     await fetch_all_metal(batch_size=5, max_pages=1)
 
 

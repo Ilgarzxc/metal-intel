@@ -1,186 +1,134 @@
-'''
-Simple API layer.
-1) Receive a request from user
-2) Connect to the database
-3) Obtain and provide formatted data (JSON)
-'''
+# app/api/releases.py
 
-
-from fastapi import APIRouter
-# Import function for connection to the database
-from app.db import get_connection
-# Import functions for executing queries and scripts 
+from fastapi import APIRouter, HTTPException
 from app.db import fetch_all, execute
-# Import class of object for releases processing
-'''
-Should be agjusted according to the recent changes that we applied to the database.
-No more 'genre' in the releases schema.
-'''
 from app.api.schemas import ReleaseCreate, ReleaseUpdate
 
-# Encapsulated application to sort and group the endpoints
 router = APIRouter()
 
-# Get a list. Create a dictionary from tuples provided by the database.
-@router.get("/releases")
-def get_releases():
-	rows = fetch_all("""SELECT 
-	r.id, r.artist, r.title, r.release_date, r.country, r.label,
-	STRING_AGG(g.name, ', ') as genres
-FROM releases r
-LEFT JOIN release_genres rg ON r.id = rg.release_id
-LEFT JOIN genres g ON rg.genre_id = g.id
-GROUP BY r.id;""")
-	releases = [
-		{
-			"id": r[0],
-			"artist": r[1],
-			"title": r[2],
-			"release_date": r[3],
-			"country": r[4],
-			"label": r[5],
-			"genres": r[6],
-		}
-		for r in rows
-	]
-	return {"releases": releases}
 
-# Function for health check.
+# -------------------------
+# DB Health Check
+# -------------------------
 @router.get("/db-check")
-def db_check():
-	try:
-		conn = get_connection()
-		cur = conn.cursor()
-		cur.execute("SELECT 1;")
-		result = cur.fetchone()
-		cur.close()
-		conn.close()
-		return {"db_status": "ok", "result": result[0]}
-	except Exception as e:
-		return {"db_status": "error", "details": str(e)}
-
-# Endpoint for creation of a new album via FastAPI interface
-@router.post("/releases/add")
-def add_release(data: ReleaseCreate):
-    conn = get_connection()
-    cur = conn.cursor()
-    
+async def db_check():
     try:
-        # 1. Insert the main release record into the 'releases' table
-        cur.execute("""
-            INSERT INTO releases (artist, title, release_date, country, label)
-            VALUES (%s, %s, %s, %s, %s)
-            RETURNING id;
-        """, (data.artist, data.title, data.release_date, data.country, data.label))
-        
-        # Get the newly generated ID for the release
-        new_id = cur.fetchone()[0]
+        result = await fetch_all("SELECT 1;")
+        return {"db_status": "ok", "result": result[0][0]}
+    except Exception as e:
+        return {"db_status": "error", "details": str(e)}
 
-        # 2. Process genres if the list is provided in the request
+
+# -------------------------
+# Get all releases
+# -------------------------
+@router.get("/releases")
+async def get_releases():
+    query = """
+    SELECT 
+        r.id, r.artist, r.title, r.release_date, r.country, r.label,
+        STRING_AGG(g.name, ', ') as genres
+    FROM releases r
+    LEFT JOIN release_genres rg ON r.id = rg.release_id
+    LEFT JOIN genres g ON rg.genre_id = g.id
+    GROUP BY r.id;
+    """
+    rows = await fetch_all(query)
+    releases = [
+        {
+            "id": r["id"],
+            "artist": r["artist"],
+            "title": r["title"],
+            "release_date": r["release_date"],
+            "country": r["country"],
+            "label": r["label"],
+            "genres": r["genres"],
+        }
+        for r in rows
+    ]
+    return {"releases": releases}
+
+
+# -------------------------
+# Add a release
+# -------------------------
+@router.post("/releases/add")
+async def add_release(data: ReleaseCreate):
+    try:
+        # Insert main release
+        insert_release = """
+        INSERT INTO releases (artist, title, release_date, country, label)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id;
+        """
+        new_id_row = await fetch_all(insert_release, data.artist, data.title, data.release_date, data.country, data.label)
+        new_id = new_id_row[0]["id"]
+
+        # Insert genres and link
         if data.genre:
             for genre_name in data.genre:
-                # Insert genre into 'genres' table or find the existing one by name
-                # 'ON CONFLICT' ensures we don't get errors for duplicate names
-                cur.execute("""
-                    INSERT INTO genres (name) VALUES (%s)
+                genre_row = await fetch_all("""
+                    INSERT INTO genres (name) VALUES ($1)
                     ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
                     RETURNING id;
-                """, (genre_name,))
-                genre_id = cur.fetchone()[0]
+                """, genre_name)
+                genre_id = genre_row[0]["id"]
+                await execute("INSERT INTO release_genres (release_id, genre_id) VALUES ($1, $2);", new_id, genre_id)
 
-                # 3. Create a link in the 'release_genres' junction table
-                cur.execute("""
-                    INSERT INTO release_genres (release_id, genre_id)
-                    VALUES (%s, %s);
-                """, (new_id, genre_id))
-
-        # Commit the transaction: all changes are saved at once
-        conn.commit()
-        
-        # Return the created object for the frontend/client
         return {"id": new_id, **data.dict()}
 
     except Exception as e:
-        # If any step fails, roll back the entire transaction to keep DB clean
-        conn.rollback()
-        raise e
-    finally:
-        # Always close the cursor and connection to prevent memory leaks
-        cur.close()
-        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
 
-# Endpoint for deletion of a release via FastAPI interface
+
+# -------------------------
+# Delete a release
+# -------------------------
 @router.delete("/releases/{release_id}")
-def delete_release(release_id: int):
-    conn = get_connection()
-    cur = conn.cursor()
+async def delete_release(release_id: int):
     try:
-        # Delete from 'releases'. 'release_genres' rows will be deleted automatically due to CASCADE
-        query = "DELETE FROM releases WHERE id = %s RETURNING id;"
-        cur.execute(query, (release_id,))
-        deleted = cur.fetchone()
-        conn.commit()
-
-        if deleted is None:
+        deleted = await fetch_all("DELETE FROM releases WHERE id = $1 RETURNING id;", release_id)
+        if not deleted:
             return {"status": "not_found", "id": release_id}
-        return {"status": "deleted", "id": deleted[0]}
+        return {"status": "deleted", "id": deleted[0]["id"]}
     except Exception as e:
-        conn.rollback()
-        raise e
-    finally:
-        cur.close()
-        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
 
-# Endpoint for update of a release via FastAPI interface
+
+# -------------------------
+# Update a release
+# -------------------------
 @router.put("/releases/{release_id}")
-def update_release(release_id: int, data: ReleaseUpdate):
-    conn = get_connection()
-    cur = conn.cursor()
-    
+async def update_release(release_id: int, data: ReleaseUpdate):
     try:
-        # 1. Update basic release fields if they are provided
         update_fields = []
         update_params = []
-        
-        # Mapping Pydantic model to SQL columns (excluding 'genre')
+
         for field, value in data.dict(exclude={'genre'}, exclude_unset=True).items():
-            update_fields.append(f"{field} = %s")
+            update_fields.append(f"{field} = ${len(update_params)+1}")
             update_params.append(value)
 
         if update_fields:
-            query = f"UPDATE releases SET {', '.join(update_fields)} WHERE id = %s RETURNING id;"
+            # Add release_id at the end for WHERE clause
             update_params.append(release_id)
-            cur.execute(query, tuple(update_params))
-            if cur.fetchone() is None:
+            query = f"UPDATE releases SET {', '.join(update_fields)} WHERE id = ${len(update_params)} RETURNING id;"
+            updated = await fetch_all(query, *update_params)
+            if not updated:
                 return {"status": "not_found", "id": release_id}
 
-        # 2. Update genres: "Delete and Replace" strategy
+        # Update genres with "delete and replace" strategy
         if data.genre is not None:
-            # Remove all old genre links for this release
-            cur.execute("DELETE FROM release_genres WHERE release_id = %s;", (release_id,))
-            
-            # Add new genre links
+            await execute("DELETE FROM release_genres WHERE release_id = $1;", release_id)
             for genre_name in data.genre:
-                # Get or create genre ID
-                cur.execute("""
-                    INSERT INTO genres (name) VALUES (%s)
+                genre_row = await fetch_all("""
+                    INSERT INTO genres (name) VALUES ($1)
                     ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
                     RETURNING id;
-                """, (genre_name,))
-                genre_id = cur.fetchone()[0]
+                """, genre_name)
+                genre_id = genre_row[0]["id"]
+                await execute("INSERT INTO release_genres (release_id, genre_id) VALUES ($1, $2);", release_id, genre_id)
 
-                # Link release with the new genre ID
-                cur.execute("""
-                    INSERT INTO release_genres (release_id, genre_id)
-                    VALUES (%s, %s);
-                """, (release_id, genre_id))
-
-        conn.commit()
         return {"status": "updated", "id": release_id}
 
     except Exception as e:
-        conn.rollback()
-        raise e
-    finally:
-        cur.close()
-        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))

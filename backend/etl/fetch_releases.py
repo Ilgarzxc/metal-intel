@@ -1,7 +1,8 @@
 import asyncio
 import logging
+
 from app.services.musicbrainz import search_releases_group
-from app.db import get_connection, execute_batch
+from app.db import get_connection, execute_batch, init_pool
 
 logging.basicConfig(
     level=logging.INFO,
@@ -12,19 +13,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# -----------------------------
-# Transform API data
-# -----------------------------
 def transform_release(item):
     mbid = item.get("id")
     title = item.get("title")
+
     artists_credits = item.get("artist-credit", [])
     artist_name = "".join(a.get("name", "") for a in artists_credits)
 
     raw_date = item.get("first-release-date", "")
     parts = raw_date.split("-") if raw_date else []
+
     while 0 < len(parts) < 3:
         parts.append("01")
+
     clean_date = "-".join(parts) if parts else None
 
     tags = item.get("tags", [])
@@ -39,10 +40,8 @@ def transform_release(item):
     }
 
 
-# -----------------------------
-# Save releases
-# -----------------------------
 async def save_releases(conn, releases):
+
     if not releases:
         logger.info("No releases to save")
         return
@@ -52,66 +51,53 @@ async def save_releases(conn, releases):
     VALUES ($1,$2,$3,$4)
     ON CONFLICT (mbid) DO NOTHING
     """
-    params = [(r["artist"], r["title"], r["release_date"], r["mbid"]) for r in releases]
-    logger.info(f"Inserting {len(params)} releases into DB: {params}")
+
+    params = [
+        (r["artist"], r["title"], r["release_date"], r["mbid"])
+        for r in releases
+    ]
+
+    logger.info(f"Inserting {len(params)} releases")
+
     await execute_batch(query, params)
 
 
-# -----------------------------
-# Save genres
-# -----------------------------
-async def save_genres(conn, releases):
-    genre_set = set()
-    for r in releases:
-        for g in r["genres"]:
-            genre_set.add(g)
-
-    if not genre_set:
-        logger.info("No genres to save")
-        return
-
-    query = """
-    INSERT INTO genres (name)
-    VALUES ($1)
-    ON CONFLICT (name) DO NOTHING
-    """
-    params = [(g,) for g in genre_set]
-    logger.info(f"Inserting {len(params)} genres into DB: {params}")
-    await execute_batch(query, params)
-
-
-# -----------------------------
-# Main fetch loop
-# -----------------------------
 async def fetch_all_metal(batch_size=5, max_pages=1):
+
     offset = 0
     page = 0
 
     conn = await get_connection()
+
     try:
+
         while True:
-            await asyncio.sleep(1)  # MusicBrainz rate limit
+
+            await asyncio.sleep(1)
 
             data = await search_releases_group("metal", batch_size, offset)
+
             releases = data.get("release-groups")
-            logger.info(f"Fetched raw data from MusicBrainz (offset {offset}): {releases}")
+
+            logger.info(f"MusicBrainz returned {len(releases)} items")
 
             if not releases:
-                logger.info("No more releases found")
                 break
 
             clean_releases = []
+
             for item in releases:
+
                 if item.get("primary-type") != "Album":
-                    logger.info(f"Skipping non-album release: {item.get('title')}")
                     continue
 
                 clean = transform_release(item)
-                logger.info(f"Transformed release: {clean}")
+
+                logger.info(f"Parsed release: {clean}")
+
                 clean_releases.append(clean)
 
             await save_releases(conn, clean_releases)
-            await save_genres(conn, clean_releases)
 
             offset += batch_size
             page += 1
@@ -119,15 +105,20 @@ async def fetch_all_metal(batch_size=5, max_pages=1):
             if max_pages and page >= max_pages:
                 logger.info("Reached test limit")
                 break
+
     finally:
         await conn.close()
 
 
-# -----------------------------
-# Entry point
-# -----------------------------
 async def main():
-    await fetch_all_metal(batch_size=5, max_pages=1)
+
+    # 🔴 critical line
+    await init_pool()
+
+    await fetch_all_metal(
+        batch_size=5,
+        max_pages=1
+    )
 
 
 if __name__ == "__main__":
